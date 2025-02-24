@@ -96,3 +96,124 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import os
+import pandas as pd
+import numpy as np
+import json
+import gzip
+import joblib
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.metrics import classification_report, balanced_accuracy_score, confusion_matrix
+
+# Rutas
+ruta_datos = "files/input"
+ruta_modelo = "files/models/model.pkl.gz"
+ruta_metricas = "files/output/metrics.json"
+
+# Función para cargar datos desde archivos ZIP
+def cargar_datos(ruta_archivo):
+    return pd.read_csv(ruta_archivo, compression="zip")
+
+# Cargar datos
+train_df = cargar_datos(os.path.join(ruta_datos, "train_data.csv.zip"))
+test_df = cargar_datos(os.path.join(ruta_datos, "test_data.csv.zip"))
+
+# Procesamiento de datos
+train_df.rename(columns={"default payment next month": "default"}, inplace=True)
+test_df.rename(columns={"default payment next month": "default"}, inplace=True)
+train_df.drop(columns=["ID"], inplace=True)
+test_df.drop(columns=["ID"], inplace=True)
+train_df.dropna(inplace=True)
+test_df.dropna(inplace=True)
+train_df.loc[train_df["EDUCATION"] > 4, "EDUCATION"] = 4
+test_df.loc[test_df["EDUCATION"] > 4, "EDUCATION"] = 4
+
+X_train, y_train = train_df.drop(columns=["default"]), train_df["default"]
+X_test, y_test = test_df.drop(columns=["default"]), test_df["default"]
+
+# Transformaciones
+categorical_features = ["SEX", "EDUCATION", "MARRIAGE"]
+numerical_features = [col for col in X_train.columns if col not in categorical_features]
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("num", StandardScaler(), numerical_features),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_features),
+    ]
+)
+
+# Definir pipeline
+pipeline = Pipeline(
+    steps=[
+        ("preprocessor", preprocessor),
+        ("pca", PCA(n_components=X_train.shape[1])),
+        ("selector", SelectKBest(f_classif, k=15)),
+        ("classifier", MLPClassifier(hidden_layer_sizes=(50,), max_iter=500, random_state=42)),
+    ]
+)
+
+# Validación cruzada
+param_grid = {
+    "classifier__hidden_layer_sizes": [(50,), (100,)],
+    "classifier__alpha": [0.0001, 0.001],
+}
+
+grid_search = GridSearchCV(pipeline, param_grid, cv=10, scoring="balanced_accuracy", n_jobs=-1)
+grid_search.fit(X_train, y_train)
+
+best_model = grid_search.best_estimator_
+
+# Guardar modelo
+with gzip.open(ruta_modelo, "wb") as f:
+    joblib.dump(best_model, f)
+
+# Predicciones
+y_train_pred, y_test_pred = best_model.predict(X_train), best_model.predict(X_test)
+
+# Métricas
+metrics = [
+    {
+        "dataset": "train",
+        "precision": classification_report(y_train, y_train_pred, output_dict=True)["1"]["precision"],
+        "balanced_accuracy": balanced_accuracy_score(y_train, y_train_pred),
+        "recall": classification_report(y_train, y_train_pred, output_dict=True)["1"]["recall"],
+        "f1_score": classification_report(y_train, y_train_pred, output_dict=True)["1"]["f1-score"],
+    },
+    {
+        "dataset": "test",
+        "precision": classification_report(y_test, y_test_pred, output_dict=True)["1"]["precision"],
+        "balanced_accuracy": balanced_accuracy_score(y_test, y_test_pred),
+        "recall": classification_report(y_test, y_test_pred, output_dict=True)["1"]["recall"],
+        "f1_score": classification_report(y_test, y_test_pred, output_dict=True)["1"]["f1-score"],
+    },
+]
+
+# Matriz de confusión
+train_cm, test_cm = confusion_matrix(y_train, y_train_pred), confusion_matrix(y_test, y_test_pred)
+
+cm_metrics = [
+    {
+        "type": "cm_matrix",
+        "dataset": "train",
+        "true_0": {"predicted_0": int(train_cm[0, 0]), "predicted_1": int(train_cm[0, 1])},
+        "true_1": {"predicted_0": int(train_cm[1, 0]), "predicted_1": int(train_cm[1, 1])},
+    },
+    {
+        "type": "cm_matrix",
+        "dataset": "test",
+        "true_0": {"predicted_0": int(test_cm[0, 0]), "predicted_1": int(test_cm[0, 1])},
+        "true_1": {"predicted_0": int(test_cm[1, 0]), "predicted_1": int(test_cm[1, 1])},
+    },
+]
+
+# Guardar métricas
+with open(ruta_metricas, "w") as f:
+    json.dump(metrics + cm_metrics, f, indent=4)
+
